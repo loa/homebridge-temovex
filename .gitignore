@@ -128,3 +128,14 @@ dist
 # modbus-proxy build output
 /modbus-proxy/modbus-proxy
 /modbus-proxy/cmd/modbus-proxy/modbus-proxy
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
