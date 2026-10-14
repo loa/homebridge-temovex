@@ -1,4 +1,5 @@
-// Command modbus-proxy serves Temovex temperatures over HTTP.
+// Command modbus-proxy serves Temovex temperatures over HTTP and writes the
+// supply-air setpoint.
 package main
 
 import (

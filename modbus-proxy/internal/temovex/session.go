@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"time"
 )
@@ -60,6 +61,21 @@ func (s *Session) Temperature(ctx context.Context, name string) (Reading, error)
 	return reading, err
 }
 
+// Setpoint writes the supply-air setpoint in degrees Celsius and returns the
+// value that was sent. The controller answers with an ACK, not the stored float.
+func (s *Session) Setpoint(ctx context.Context, celsius float64) (Reading, error) {
+	if math.IsNaN(celsius) || math.IsInf(celsius, 0) {
+		return Reading{}, errNonFinite
+	}
+	err := s.call(ctx, func(c *Client) error {
+		return c.SetSet(ctx, celsius)
+	})
+	if err != nil {
+		return Reading{}, err
+	}
+	return reading(sigSet, celsius), nil
+}
+
 // Temperatures reads setpoint, exhaust, extract, outdoor, and supply air,
 // in that order.
 func (s *Session) Temperatures(ctx context.Context) ([]Reading, error) {
@@ -93,7 +109,7 @@ func retryable(ctx context.Context, err error) bool {
 	if errors.As(err, &controller) {
 		return false
 	}
-	if errors.Is(err, ErrUnknown) {
+	if errors.Is(err, ErrUnknown) || errors.Is(err, errNonFinite) {
 		return false
 	}
 	return true
