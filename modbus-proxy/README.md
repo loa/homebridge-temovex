@@ -35,16 +35,19 @@ curl -s localhost:8080/temperatures
 ```
 
 ```json
-{"unit":"celsius","set":18.0,"al":21.8,"fl":22.1,"ul":4.5,"tl":19.2}
+{
+  "unit": "celsius",
+  "temperatures": [
+    {"name": "set", "description": "Supply-air setpoint", "celsius": 18.0},
+    {"name": "al", "description": "Exhaust air", "celsius": 21.8},
+    {"name": "fl", "description": "Extract air", "celsius": 22.1},
+    {"name": "ul", "description": "Outdoor air", "celsius": 4.5},
+    {"name": "tl", "description": "Supply air", "celsius": 19.2}
+  ]
+}
 ```
 
-`GET /temperatures/ul` returns that one sensor:
-
-```json
-{"name":"ul","description":"Outdoor air","unit":"celsius","celsius":4.5}
-```
-
-`GET /health` and `GET /ready` report that the process is serving. They do not dial the controller.
+`GET /temperatures` is the only temperature route. One call reads all five sensors. `GET /health` and `GET /ready` report that the process is serving. They do not dial the controller.
 
 ## Docker
 

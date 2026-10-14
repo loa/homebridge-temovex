@@ -26,29 +26,24 @@ func TestTemperaturesJSONMatchesExporterLabels(t *testing.T) {
 		{Name: "tl", Celsius: 21.845},
 	}}
 	body := get(t, src, "/temperatures")
-	want := `{"unit":"celsius","set":18.0,"al":21.8,"fl":22.1,"ul":4.5,"tl":21.8}` + "\n"
+	want := `{"unit":"celsius","temperatures":[` +
+		`{"name":"set","description":"Supply-air setpoint","celsius":18.0},` +
+		`{"name":"al","description":"Exhaust air","celsius":21.8},` +
+		`{"name":"fl","description":"Extract air","celsius":22.1},` +
+		`{"name":"ul","description":"Outdoor air","celsius":4.5},` +
+		`{"name":"tl","description":"Supply air","celsius":21.8}` +
+		`]}` + "\n"
 	if body != want {
 		t.Fatalf("body = %s, want %s", body, want)
 	}
 }
 
-func TestTemperatureByName(t *testing.T) {
-	src := fakeSource{readings: []temovex.Reading{
-		{Name: "ul", Description: "Outdoor air", Celsius: -4.44},
-	}}
-	body := get(t, src, "/temperatures/ul")
-	want := `{"name":"ul","description":"Outdoor air","unit":"celsius","celsius":-4.4}` + "\n"
-	if body != want {
-		t.Fatalf("body = %s, want %s", body, want)
-	}
-}
-
-func TestUnknownTemperature(t *testing.T) {
-	rec := request(t, fakeSource{}, http.MethodGet, "/temperatures/room")
+func TestPerSensorPathIsNotFound(t *testing.T) {
+	rec := request(t, fakeSource{}, http.MethodGet, "/temperatures/ul")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "unknown temperature") {
+	if !strings.Contains(rec.Body.String(), "not found") {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
 }
@@ -74,7 +69,7 @@ func TestReadTimeout(t *testing.T) {
 	src := fakeSource{block: true}
 	srv := &Server{Source: src, Timeout: 30 * time.Millisecond}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/temperatures/set", nil)
+	req := httptest.NewRequest(http.MethodGet, "/temperatures", nil)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusGatewayTimeout {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
@@ -90,8 +85,14 @@ func TestIncompleteReadingSet(t *testing.T) {
 }
 
 func TestNonFiniteTemperature(t *testing.T) {
-	src := fakeSource{readings: []temovex.Reading{{Name: "set", Celsius: math.NaN()}}}
-	rec := request(t, src, http.MethodGet, "/temperatures/set")
+	src := fakeSource{readings: []temovex.Reading{
+		{Name: "set", Celsius: math.NaN()},
+		{Name: "al", Celsius: 1},
+		{Name: "fl", Celsius: 1},
+		{Name: "ul", Celsius: 1},
+		{Name: "tl", Celsius: 1},
+	}}
+	rec := request(t, src, http.MethodGet, "/temperatures")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -192,7 +193,13 @@ func TestEndToEndAgainstFakeUnit(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, body %s", resp.StatusCode, payload)
 	}
-	want := `{"unit":"celsius","set":19.0,"al":19.0,"fl":19.0,"ul":19.0,"tl":19.0}` + "\n"
+	want := `{"unit":"celsius","temperatures":[` +
+		`{"name":"set","description":"Supply-air setpoint","celsius":19.0},` +
+		`{"name":"al","description":"Exhaust air","celsius":19.0},` +
+		`{"name":"fl","description":"Extract air","celsius":19.0},` +
+		`{"name":"ul","description":"Outdoor air","celsius":19.0},` +
+		`{"name":"tl","description":"Supply air","celsius":19.0}` +
+		`]}` + "\n"
 	if string(payload) != want {
 		t.Fatalf("body = %s", payload)
 	}
@@ -229,21 +236,6 @@ func (f fakeSource) Temperatures(ctx context.Context) ([]temovex.Reading, error)
 		return nil, f.err
 	}
 	return f.readings, nil
-}
-
-func (f fakeSource) Temperature(ctx context.Context, name string) (temovex.Reading, error) {
-	if err := f.wait(ctx); err != nil {
-		return temovex.Reading{}, err
-	}
-	if f.err != nil {
-		return temovex.Reading{}, f.err
-	}
-	for _, reading := range f.readings {
-		if reading.Name == name {
-			return reading, nil
-		}
-	}
-	return temovex.Reading{}, temovex.ErrUnknown
 }
 
 func (f fakeSource) wait(ctx context.Context) error {

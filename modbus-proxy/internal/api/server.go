@@ -18,10 +18,9 @@ import (
 
 const defaultTimeout = 60 * time.Second
 
-// Source reads temperatures. *temovex.Session implements it.
+// Source reads every Temovex temperature in one call. *temovex.Session implements it.
 type Source interface {
 	Temperatures(ctx context.Context) ([]temovex.Reading, error)
-	Temperature(ctx context.Context, name string) (temovex.Reading, error)
 }
 
 // Server is the REST API. Timeout bounds one HTTP read of the controller,
@@ -36,14 +35,12 @@ type Server struct {
 //	GET /health
 //	GET /ready
 //	GET /temperatures
-//	GET /temperatures/{name}
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("GET /health", s.status)
 	mux.HandleFunc("GET /ready", s.status)
 	mux.HandleFunc("GET /temperatures", s.temperatures)
-	mux.HandleFunc("GET /temperatures/{name}", s.temperature)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "not found"})
 	})
@@ -80,64 +77,42 @@ func (s *Server) temperatures(w http.ResponseWriter, r *http.Request) {
 
 func newTemperaturesBody(readings []temovex.Reading) (temperaturesBody, error) {
 	want := temovex.Names()
-	if len(readings) != len(want) {
-		return temperaturesBody{}, fmt.Errorf("expected %d temperatures, got %d", len(want), len(readings))
-	}
-	body := temperaturesBody{Unit: "celsius"}
-	seen := make(map[string]bool, len(want))
+	byName := make(map[string]temovex.Reading, len(readings))
 	for _, reading := range readings {
-		if seen[reading.Name] {
+		if _, ok := byName[reading.Name]; ok {
 			return temperaturesBody{}, fmt.Errorf("duplicate temperature %q", reading.Name)
+		}
+		byName[reading.Name] = reading
+	}
+	if len(byName) != len(want) {
+		return temperaturesBody{}, fmt.Errorf("expected %d temperatures, got %d", len(want), len(byName))
+	}
+
+	body := temperaturesBody{
+		Unit:         "celsius",
+		Temperatures: make([]temperatureJSON, 0, len(want)),
+	}
+	for _, name := range want {
+		reading, ok := byName[name]
+		if !ok {
+			return temperaturesBody{}, fmt.Errorf("missing temperature %q", name)
 		}
 		if math.IsNaN(reading.Celsius) || math.IsInf(reading.Celsius, 0) {
 			return temperaturesBody{}, fmt.Errorf("%s: non-finite temperature", reading.Name)
 		}
-		seen[reading.Name] = true
-		value := celsius(reading.Celsius)
-		switch reading.Name {
-		case "set":
-			body.Set = value
-		case "al":
-			body.AL = value
-		case "fl":
-			body.FL = value
-		case "ul":
-			body.UL = value
-		case "tl":
-			body.TL = value
-		default:
-			return temperaturesBody{}, fmt.Errorf("unexpected temperature %q", reading.Name)
+		description := reading.Description
+		if description == "" {
+			if meta, ok := temovex.Lookup(name); ok {
+				description = meta.Description
+			}
 		}
+		body.Temperatures = append(body.Temperatures, temperatureJSON{
+			Name:        name,
+			Description: description,
+			Celsius:     celsius(reading.Celsius),
+		})
 	}
 	return body, nil
-}
-
-func (s *Server) temperature(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	meta, ok := temovex.Lookup(name)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, errorBody{Error: fmt.Sprintf("unknown temperature %q", name)})
-		return
-	}
-
-	ctx, cancel := s.context(r)
-	defer cancel()
-
-	reading, err := s.Source.Temperature(ctx, name)
-	if err != nil {
-		s.writeReadError(w, r, err)
-		return
-	}
-	if math.IsNaN(reading.Celsius) || math.IsInf(reading.Celsius, 0) {
-		s.writeReadError(w, r, fmt.Errorf("%s: non-finite temperature", name))
-		return
-	}
-	writeJSON(w, http.StatusOK, temperatureBody{
-		Name:        meta.Name,
-		Description: meta.Description,
-		Unit:        "celsius",
-		Celsius:     celsius(reading.Celsius),
-	})
 }
 
 func (s *Server) context(r *http.Request) (context.Context, context.CancelFunc) {
@@ -150,9 +125,7 @@ func (s *Server) context(r *http.Request) (context.Context, context.CancelFunc) 
 
 func (s *Server) writeReadError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusBadGateway
-	if errors.Is(err, temovex.ErrUnknown) {
-		status = http.StatusNotFound
-	} else if timedOut(err) {
+	if timedOut(err) {
 		status = http.StatusGatewayTimeout
 	}
 	if status >= 500 {
@@ -178,20 +151,15 @@ type statusBody struct {
 	Status string `json:"status"`
 }
 
-// temperaturesBody uses the exporter label names as JSON keys, in scrape order.
+// temperaturesBody is the only temperature resource. Names follow the exporter scrape order.
 type temperaturesBody struct {
-	Unit string  `json:"unit"`
-	Set  celsius `json:"set"`
-	AL   celsius `json:"al"`
-	FL   celsius `json:"fl"`
-	UL   celsius `json:"ul"`
-	TL   celsius `json:"tl"`
+	Unit         string            `json:"unit"`
+	Temperatures []temperatureJSON `json:"temperatures"`
 }
 
-type temperatureBody struct {
+type temperatureJSON struct {
 	Name        string  `json:"name"`
 	Description string  `json:"description"`
-	Unit        string  `json:"unit"`
 	Celsius     celsius `json:"celsius"`
 }
 
