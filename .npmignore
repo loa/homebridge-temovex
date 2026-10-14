@@ -1,6 +1,19 @@
 # Ignore source code
 src
 
+# Go service, published separately from the Homebridge package
+/modbus-proxy
+
+# devenv
+devenv.nix
+devenv.yaml
+devenv.lock
+.envrc
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+.direnv
+
 # ------------- Defaults ------------- #
 
 # gitHub actions
