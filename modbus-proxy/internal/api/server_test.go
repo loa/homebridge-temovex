@@ -39,7 +39,7 @@ func TestTemperaturesJSONMatchesExporterLabels(t *testing.T) {
 }
 
 func TestPerSensorPathIsNotFound(t *testing.T) {
-	rec := request(t, fakeSource{}, http.MethodGet, "/temperatures/ul")
+	rec := request(t, fakeSource{}, http.MethodGet, "/temperatures/ul", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -50,7 +50,7 @@ func TestPerSensorPathIsNotFound(t *testing.T) {
 
 func TestUpstreamError(t *testing.T) {
 	src := fakeSource{err: errors.New("dial 192.168.3.2:26486: connection refused")}
-	rec := request(t, src, http.MethodGet, "/temperatures")
+	rec := request(t, src, http.MethodGet, "/temperatures", "")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -78,7 +78,7 @@ func TestReadTimeout(t *testing.T) {
 
 func TestIncompleteReadingSet(t *testing.T) {
 	src := fakeSource{readings: []temovex.Reading{{Name: "set", Celsius: 1}}}
-	rec := request(t, src, http.MethodGet, "/temperatures")
+	rec := request(t, src, http.MethodGet, "/temperatures", "")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -92,7 +92,7 @@ func TestNonFiniteTemperature(t *testing.T) {
 		{Name: "ul", Celsius: 1},
 		{Name: "tl", Celsius: 1},
 	}}
-	rec := request(t, src, http.MethodGet, "/temperatures")
+	rec := request(t, src, http.MethodGet, "/temperatures", "")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -111,7 +111,7 @@ func TestHealthReadyAndIndex(t *testing.T) {
 	if body != want {
 		t.Fatalf("index = %s", body)
 	}
-	rec := request(t, src, http.MethodGet, "/nope")
+	rec := request(t, src, http.MethodGet, "/nope", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -205,19 +205,71 @@ func TestEndToEndAgainstFakeUnit(t *testing.T) {
 	}
 }
 
+func TestSetSetpoint(t *testing.T) {
+	var got float64
+	src := fakeSource{setpoint: &got}
+	rec := request(t, src, http.MethodPut, "/temperatures/set", `{"celsius":21.5}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	want := `{"name":"set","description":"Supply-air setpoint","celsius":21.5}` + "\n"
+	if rec.Body.String() != want {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+	if got != 21.5 {
+		t.Fatalf("setpoint = %v", got)
+	}
+	for _, body := range []string{`{"celsius":10}`, `{"celsius":40}`} {
+		rec = request(t, fakeSource{}, http.MethodPut, "/temperatures/set", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("body %s status = %d, response %s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec = request(t, fakeSource{}, http.MethodGet, "/temperatures/set", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET status = %d", rec.Code)
+	}
+}
+
+func TestSetSetpointRejectsBadBody(t *testing.T) {
+	cases := []string{``, `{"celsius":9.9}`, `{"celsius":40.1}`, `{"celsius":null}`, `{"other":1}`, `[]`, `{"celsius":"21"}`}
+	for _, body := range cases {
+		rec := request(t, fakeSource{}, http.MethodPut, "/temperatures/set", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status = %d, response %s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestSetSetpointUpstreamError(t *testing.T) {
+	src := fakeSource{setErr: errors.New("controller error 0x50: real value error")}
+	rec := request(t, src, http.MethodPut, "/temperatures/set", `{"celsius":18}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func get(t *testing.T, src Source, path string) string {
 	t.Helper()
-	rec := request(t, src, http.MethodGet, path)
+	rec := request(t, src, http.MethodGet, path, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%s status = %d, body %s", path, rec.Code, rec.Body.String())
 	}
 	return rec.Body.String()
 }
 
-func request(t *testing.T, src Source, method, path string) *httptest.ResponseRecorder {
+func request(t *testing.T, src Source, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(method, path, nil)
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	(&Server{Source: src}).Handler().ServeHTTP(rec, req)
 	return rec
 }
@@ -225,7 +277,9 @@ func request(t *testing.T, src Source, method, path string) *httptest.ResponseRe
 type fakeSource struct {
 	readings []temovex.Reading
 	err      error
+	setErr   error
 	block    bool
+	setpoint *float64
 }
 
 func (f fakeSource) Temperatures(ctx context.Context) ([]temovex.Reading, error) {
@@ -236,6 +290,19 @@ func (f fakeSource) Temperatures(ctx context.Context) ([]temovex.Reading, error)
 		return nil, f.err
 	}
 	return f.readings, nil
+}
+
+func (f fakeSource) SetSetpoint(ctx context.Context, celsius float64) error {
+	if err := f.wait(ctx); err != nil {
+		return err
+	}
+	if f.setErr != nil {
+		return f.setErr
+	}
+	if f.setpoint != nil {
+		*f.setpoint = celsius
+	}
+	return nil
 }
 
 func (f fakeSource) wait(ctx context.Context) error {

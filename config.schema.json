@@ -1,17 +1,27 @@
 {
-  "pluginAlias": "ExampleHomebridgePlugin",
+  "pluginAlias": "Temovex",
   "pluginType": "platform",
   "singular": true,
-  "strictValidation": false,
+  "headerDisplay": "The supply-air setpoint is a thermostat. Exhaust, extract, outdoor, and supply air are temperature sensors. Readings are fetched from modbus-proxy when HomeKit asks.",
   "schema": {
     "type": "object",
-    "required": ["name"],
+    "required": ["name", "url"],
     "additionalProperties": false,
     "properties": {
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "Example Dynamic Platform"
+        "required": true,
+        "default": "Temovex"
+      },
+      "url": {
+        "title": "Proxy URL",
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https?://",
+        "required": true,
+        "placeholder": "http://192.168.1.10:8080",
+        "description": "Base URL of modbus-proxy, including http:// or https://. The supply-air setpoint can be set from 10 to 40 °C."
       }
     }
   }

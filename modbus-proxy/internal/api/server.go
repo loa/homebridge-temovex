@@ -16,14 +16,20 @@ import (
 	"github.com/loa/homebridge-temovex/modbus-proxy/internal/temovex"
 )
 
-const defaultTimeout = 60 * time.Second
+const (
+	defaultTimeout = 60 * time.Second
+	minSetpointC   = 10
+	maxSetpointC   = 40
+)
 
-// Source reads every Temovex temperature in one call. *temovex.Session implements it.
+// Source reads every Temovex temperature in one call and writes the supply-air
+// setpoint. *temovex.Session implements it.
 type Source interface {
 	Temperatures(ctx context.Context) ([]temovex.Reading, error)
+	SetSetpoint(ctx context.Context, celsius float64) error
 }
 
-// Server is the REST API. Timeout bounds one HTTP read of the controller,
+// Server is the REST API. Timeout bounds one HTTP call to the controller,
 // including a single reconnect. Zero uses a 60 second default.
 type Server struct {
 	Source  Source
@@ -35,12 +41,14 @@ type Server struct {
 //	GET /health
 //	GET /ready
 //	GET /temperatures
+//	PUT /temperatures/set
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.index)
 	mux.HandleFunc("GET /health", s.status)
 	mux.HandleFunc("GET /ready", s.status)
 	mux.HandleFunc("GET /temperatures", s.temperatures)
+	mux.HandleFunc("PUT /temperatures/set", s.setSetpoint)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorBody{Error: "not found"})
 	})
@@ -56,6 +64,49 @@ func (s *Server) index(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, statusBody{Status: "ok"})
+}
+
+func (s *Server) setSetpoint(w http.ResponseWriter, r *http.Request) {
+	degrees, err := decodeSetpoint(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody{Error: err.Error()})
+		return
+	}
+	ctx, cancel := s.context(r)
+	defer cancel()
+	if err := s.Source.SetSetpoint(ctx, degrees); err != nil {
+		s.writeReadError(w, r, err)
+		return
+	}
+	slog.Info("setpoint updated", "celsius", degrees)
+	writeJSON(w, http.StatusOK, temperatureJSON{
+		Name:        "set",
+		Description: "Supply-air setpoint",
+		Celsius:     celsius(degrees),
+	})
+}
+
+func decodeSetpoint(r *http.Request) (float64, error) {
+	r.Body = http.MaxBytesReader(nil, r.Body, 4096)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var body struct {
+		Celsius *float64 `json:"celsius"`
+	}
+	if err := decoder.Decode(&body); err != nil || decoder.More() {
+		return 0, errors.New("expected JSON object with celsius")
+	}
+	if body.Celsius == nil {
+		return 0, errors.New("celsius is required")
+	}
+	degrees := *body.Celsius
+	if math.IsNaN(degrees) || math.IsInf(degrees, 0) {
+		return 0, errors.New("celsius must be a finite number")
+	}
+	if degrees < minSetpointC || degrees > maxSetpointC {
+		return 0, fmt.Errorf("celsius must be between %d and %d", minSetpointC, maxSetpointC)
+	}
+	return degrees, nil
 }
 
 func (s *Server) temperatures(w http.ResponseWriter, r *http.Request) {

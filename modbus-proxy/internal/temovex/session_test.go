@@ -190,6 +190,36 @@ func TestSessionUnknownNameDoesNotDial(t *testing.T) {
 	}
 }
 
+func TestSessionSetsSetpoint(t *testing.T) {
+	ack := []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}
+	var got []byte
+	unit := startUnit(t, false, func(frame []byte) []byte {
+		got = append([]byte{}, frame...)
+		return ack
+	})
+	session := NewSession(unit.addr, time.Second, time.Second)
+	t.Cleanup(func() { _ = session.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := session.SetSetpoint(ctx, 23); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0x3c, 0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xb8, 0x41, 0xe6, 0x3e}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("sent %x, want %x", got, want)
+	}
+	if unit.accepts.Load() != 1 {
+		t.Fatalf("accepts = %d, want 1", unit.accepts.Load())
+	}
+
+	if err := session.SetSetpoint(ctx, math.NaN()); err == nil {
+		t.Fatal("expected non-finite setpoint to fail")
+	}
+	if unit.accepts.Load() != 1 {
+		t.Fatalf("non-finite setpoint dialed the controller, accepts = %d", unit.accepts.Load())
+	}
+}
+
 func TestSessionDialFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -1,5 +1,6 @@
 // Package temovex reads the five temperatures published by
-// github.com/loa/temovex-exporter from a REC Temovex controller.
+// github.com/loa/temovex-exporter from a REC Temovex controller and writes
+// the supply-air setpoint.
 //
 // The session is EXOline-TCP, not Modbus-TCP. Each read is a MULCMD (0xC8)
 // wrapped RRP (0xB6) request, which the controller answers with a
@@ -8,6 +9,7 @@ package temovex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -125,6 +127,44 @@ func (c *Client) GetTL(ctx context.Context) (float64, error) {
 	return c.getFloat(ctx, sigTL.payload)
 }
 
+// SetSet writes the supply-air setpoint. The address is the same line and cell
+// GetSet reads. The frame is a MULCMD-wrapped SRP (0x32), which is the write
+// used by github.com/stampzilla/stampzilla-go for this controller.
+func (c *Client) SetSet(ctx context.Context, celsius float64) error {
+	payload, err := setpointPayload(celsius)
+	if err != nil {
+		return err
+	}
+	msg, err := c.exchange(ctx, payload)
+	if err != nil {
+		return err
+	}
+	if len(msg) == 4 {
+		return controllerError(msg[1])
+	}
+	if !writeAcknowledged(msg) {
+		return fmt.Errorf("unexpected setpoint response, got %d bytes", len(msg))
+	}
+	return nil
+}
+
+func setpointPayload(celsius float64) ([]byte, error) {
+	if math.IsNaN(celsius) || math.IsInf(celsius, 0) {
+		return nil, errors.New("non-finite setpoint")
+	}
+	// Length 0x08 is the SRP opcode, line, cell high, cell low, and float32.
+	payload := []byte{0xff, 0x1e, 0xc8, 0x08, 0x32, sigSet.payload[5], sigSet.payload[6], sigSet.payload[7], 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(payload[8:], math.Float32bits(float32(celsius)))
+	return payload, nil
+}
+
+func writeAcknowledged(msg []byte) bool {
+	// MULCMD writes on this unit answer 3D 01 00 01 3E. A direct write answers
+	// with an empty ACK, 3D 00 3E.
+	return bytes.Equal(msg, []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}) ||
+		bytes.Equal(msg, []byte{0x3d, 0x00, 0x3e})
+}
+
 // Temperature reads one named temperature.
 func (c *Client) Temperature(ctx context.Context, name string) (Reading, error) {
 	sig, ok := lookup(name)
@@ -158,20 +198,7 @@ func reading(sig signal, value float64) Reading {
 }
 
 func (c *Client) getFloat(ctx context.Context, msg []byte) (float64, error) {
-	if c.Conn == nil || c.Reader == nil {
-		return 0, errors.New("not connected")
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := c.setDeadline(ctx); err != nil {
-		return 0, err
-	}
-	if err := c.send(msg); err != nil {
-		return 0, err
-	}
-
-	msg, err := c.read()
+	msg, err := c.exchange(ctx, msg)
 	if err != nil {
 		return 0, err
 	}
@@ -185,6 +212,22 @@ func (c *Client) getFloat(ctx context.Context, msg []byte) (float64, error) {
 		return 0, fmt.Errorf("expected float response, got %d bytes", len(msg))
 	}
 	return parseFloat(msg[3 : len(msg)-2])
+}
+
+func (c *Client) exchange(ctx context.Context, msg []byte) ([]byte, error) {
+	if c.Conn == nil || c.Reader == nil {
+		return nil, errors.New("not connected")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := c.setDeadline(ctx); err != nil {
+		return nil, err
+	}
+	if err := c.send(msg); err != nil {
+		return nil, err
+	}
+	return c.read()
 }
 
 func (c *Client) setDeadline(ctx context.Context) error {

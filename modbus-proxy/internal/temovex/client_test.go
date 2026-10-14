@@ -216,6 +216,81 @@ func TestShortResponse(t *testing.T) {
 	}
 }
 
+func TestSetSetWritesSupplySetpoint(t *testing.T) {
+	// 23°C is the float the exporter read back for this same cell: 00 00 B8 41.
+	payload := []byte{0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xb8, 0x41}
+	wire := []byte{0x3c, 0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xb8, 0x41, 0xe6, 0x3e}
+	if got := encode(payload); !bytes.Equal(got, wire) {
+		t.Fatalf("encode = %x, want %x", got, wire)
+	}
+	if !bytes.Equal(payload[5:8], sigSet.payload[5:8]) {
+		t.Fatalf("setpoint address = %x, read address = %x", payload[5:8], sigSet.payload[5:8])
+	}
+
+	ack := []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}
+	got, err := exchangeSet(t, 23, ack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wire) {
+		t.Fatalf("sent %x, want %x", got, wire)
+	}
+
+	got, err = exchangeSet(t, 23, []byte{0x3d, 0x00, 0x3e})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wire) {
+		t.Fatalf("sent %x, want %x", got, wire)
+	}
+
+	_, err = exchangeSet(t, 23, []byte{0x3d, 0x15, 0x15, 0x3e})
+	if err == nil || err.Error() != "controller error 0x15: variable not found or access denied" {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err = setpointPayload(math.NaN()); err == nil {
+		t.Fatal("expected non-finite setpoint to fail")
+	}
+}
+
+func exchangeSet(t *testing.T, celsius float64, response []byte) ([]byte, error) {
+	t.Helper()
+	srv, cli := net.Pipe()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = cli.Close()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	_ = srv.SetDeadline(deadline)
+	_ = cli.SetDeadline(deadline)
+
+	type captured struct {
+		got []byte
+		err error
+	}
+	ch := make(chan captured, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, err := srv.Read(buf)
+		if err != nil {
+			ch <- captured{err: err}
+			return
+		}
+		_, err = srv.Write(response)
+		ch <- captured{got: append([]byte{}, buf[:n]...), err: err}
+	}()
+
+	client := &Client{Conn: cli, Reader: bufio.NewReader(cli), readTimeout: 2 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := client.SetSet(ctx, celsius)
+	capd := <-ch
+	if capd.err != nil {
+		return capd.got, capd.err
+	}
+	return capd.got, err
+}
+
 func TestNamesFollowCollectorOrder(t *testing.T) {
 	want := []string{"set", "al", "fl", "ul", "tl"}
 	got := Names()

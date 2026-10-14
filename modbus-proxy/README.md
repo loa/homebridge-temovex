@@ -14,7 +14,7 @@ The upstream session is EXOline-TCP (port 26486 in the exporter's unit file), no
 
 Requests are serialized on one TCP connection. A dropped connection is dialed again once before the request fails. A controller error frame is returned as-is and the connection stays open.
 
-Do not publish this port on an untrusted network. The controller answers these reads with no authentication.
+Do not publish this port on an untrusted network. The controller answers these reads with no authentication, and the setpoint write is unauthenticated too.
 
 ## Run
 
@@ -47,7 +47,19 @@ curl -s localhost:8080/temperatures
 }
 ```
 
-`GET /temperatures` is the only temperature route. One call reads all five sensors. `GET /health` and `GET /ready` report that the process is serving. They do not dial the controller.
+`GET /temperatures` reads all five sensors. `GET /health` and `GET /ready` report that the process is serving. They do not dial the controller.
+
+`PUT /temperatures/set` writes the supply-air setpoint. The body is JSON, `{"celsius": 21.5}`. Values outside 10–40 °C are rejected before the controller is dialed. The write is the EXOline SRP for the same line and cell `GetSet` reads (line 4, cell 8). A successful response echoes the accepted value:
+
+```bash
+curl -s -X PUT localhost:8080/temperatures/set \
+  -H 'content-type: application/json' \
+  -d '{"celsius":21.5}'
+```
+
+```json
+{"name":"set","description":"Supply-air setpoint","celsius":21.5}
+```
 
 ## Docker
 

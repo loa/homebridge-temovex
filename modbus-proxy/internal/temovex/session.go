@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"time"
 )
@@ -58,6 +59,16 @@ func (s *Session) Temperature(ctx context.Context, name string) (Reading, error)
 		return nil
 	})
 	return reading, err
+}
+
+// SetSetpoint writes the supply-air setpoint in degrees Celsius.
+func (s *Session) SetSetpoint(ctx context.Context, celsius float64) error {
+	if math.IsNaN(celsius) || math.IsInf(celsius, 0) {
+		return errors.New("non-finite setpoint")
+	}
+	return s.call(ctx, func(c *Client) error {
+		return c.SetSet(ctx, celsius)
+	})
 }
 
 // Temperatures reads setpoint, exhaust, extract, outdoor, and supply air,
