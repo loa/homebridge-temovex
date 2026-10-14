@@ -1,0 +1,27 @@
+name: modbus-proxy
+
+on:
+  push:
+    paths:
+      - "modbus-proxy/**"
+      - ".github/workflows/modbus-proxy.yml"
+  pull_request:
+    paths:
+      - "modbus-proxy/**"
+      - ".github/workflows/modbus-proxy.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modbus-proxy
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: modbus-proxy/go.mod
+
+      - name: Test
+        run: go test -race ./...
