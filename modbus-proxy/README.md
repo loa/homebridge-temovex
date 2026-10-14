@@ -1,6 +1,6 @@
 # modbus-proxy
 
-HTTP service that reads a REC Temovex controller the same way [temovex-exporter](https://github.com/loa/temovex-exporter) does, and publishes the five temperatures as JSON.
+HTTP service that reads a REC Temovex controller the same way [temovex-exporter](https://github.com/loa/temovex-exporter) does, and publishes the five temperatures as JSON. `PUT /temperatures/set` writes the supply-air setpoint back to that controller.
 
 The upstream session is EXOline-TCP (port 26486 in the exporter's unit file), not Modbus-TCP. Each scrape sends the exporter's five MULCMD reads, in the same order, and rounds each value to one decimal place before it is served. That rounding is the same `math.Round(v*10)/10` step the exporter applies to `temovex_temperature_c`.
 
@@ -14,7 +14,7 @@ The upstream session is EXOline-TCP (port 26486 in the exporter's unit file), no
 
 Requests are serialized on one TCP connection. A dropped connection is dialed again once before the request fails. A controller error frame is returned as-is and the connection stays open.
 
-Do not publish this port on an untrusted network. The controller answers these reads with no authentication.
+Do not publish this port on an untrusted network. The controller answers these reads and writes with no authentication. PUT changes the supply-air setpoint.
 
 ## Run
 
@@ -47,7 +47,25 @@ curl -s localhost:8080/temperatures
 }
 ```
 
-`GET /temperatures` is the only temperature route. One call reads all five sensors. `GET /health` and `GET /ready` report that the process is serving. They do not dial the controller.
+`GET /temperatures` reads all five sensors in one call. `PUT /temperatures/set` writes the supply-air setpoint (`set`). The other four names are measurements and have no write route. `GET /health` and `GET /ready` report that the process is serving. They do not dial the controller.
+
+```bash
+curl -s -X PUT localhost:8080/temperatures/set \
+  -H 'content-type: application/json' \
+  -d '{"celsius":21.5}'
+```
+
+```json
+{
+  "name": "set",
+  "description": "Supply-air setpoint",
+  "celsius": 21.5
+}
+```
+
+`celsius` is rounded to one decimal place before it is written, the same rounding `GET /temperatures` applies. The rounded value must be from 0 to 50 inclusive. A value outside that range is rejected before a frame is sent. The controller can still reject a value outside its own configured limits, and that error is returned as JSON.
+
+The write is a MULCMD-wrapped SRP (`0x32`) for line 4, cell 8, the same variable `GetSet` reads with RRP (`0xB6`). A successful answer is the five-byte ACK `3D 01 00 01 3E`.
 
 ## Docker
 

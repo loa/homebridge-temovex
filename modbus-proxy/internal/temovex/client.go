@@ -1,13 +1,16 @@
 // Package temovex reads the five temperatures published by
-// github.com/loa/temovex-exporter from a REC Temovex controller.
+// github.com/loa/temovex-exporter from a REC Temovex controller, and writes
+// the supply-air setpoint.
 //
 // The session is EXOline-TCP, not Modbus-TCP. Each read is a MULCMD (0xC8)
 // wrapped RRP (0xB6) request, which the controller answers with a
 // little-endian float32. Frames, addresses, and checksums match that exporter.
+// The setpoint write is a MULCMD-wrapped SRP (0x32) for the same line and cell.
 package temovex
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -20,6 +23,9 @@ import (
 // ErrUnknown is returned when a temperature name is not one of the five
 // exporter labels: set, al, fl, ul, tl.
 var ErrUnknown = errors.New("unknown temperature")
+
+// errNonFinite is a caller error. It must not be retried as a transport failure.
+var errNonFinite = errors.New("non-finite temperature")
 
 // Reading is one temperature in degrees Celsius.
 type Reading struct {
@@ -125,6 +131,35 @@ func (c *Client) GetTL(ctx context.Context) (float64, error) {
 	return c.getFloat(ctx, sigTL.payload)
 }
 
+// SetSet writes the supply-air setpoint in degrees Celsius.
+// The value is sent as an IEEE-754 binary32. A non-finite value is rejected
+// before a frame is written.
+func (c *Client) SetSet(ctx context.Context, celsius float64) error {
+	payload, err := writeSetPayload(celsius)
+	if err != nil {
+		return err
+	}
+	if err := c.setFloat(ctx, payload); err != nil {
+		return fmt.Errorf("set: %w", err)
+	}
+	return nil
+}
+
+// writeSetPayload is the MULCMD SRP for GetSet's line and cell.
+// RRP is four bytes (opcode, line, cell high, cell low). SRP appends the
+// float32, so the MULCMD length byte is 8.
+func writeSetPayload(celsius float64) ([]byte, error) {
+	if math.IsNaN(celsius) || math.IsInf(celsius, 0) {
+		return nil, errNonFinite
+	}
+	payload := []byte{0xff, 0x1e, 0xc8, 0x08, 0x32}
+	payload = append(payload, sigSet.payload[5:]...)
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], math.Float32bits(float32(celsius)))
+	payload = append(payload, buf[:]...)
+	return payload, nil
+}
+
 // Temperature reads one named temperature.
 func (c *Client) Temperature(ctx context.Context, name string) (Reading, error) {
 	sig, ok := lookup(name)
@@ -158,20 +193,7 @@ func reading(sig signal, value float64) Reading {
 }
 
 func (c *Client) getFloat(ctx context.Context, msg []byte) (float64, error) {
-	if c.Conn == nil || c.Reader == nil {
-		return 0, errors.New("not connected")
-	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if err := c.setDeadline(ctx); err != nil {
-		return 0, err
-	}
-	if err := c.send(msg); err != nil {
-		return 0, err
-	}
-
-	msg, err := c.read()
+	msg, err := c.exchange(ctx, msg)
 	if err != nil {
 		return 0, err
 	}
@@ -185,6 +207,39 @@ func (c *Client) getFloat(ctx context.Context, msg []byte) (float64, error) {
 		return 0, fmt.Errorf("expected float response, got %d bytes", len(msg))
 	}
 	return parseFloat(msg[3 : len(msg)-2])
+}
+
+func (c *Client) setFloat(ctx context.Context, msg []byte) error {
+	msg, err := c.exchange(ctx, msg)
+	if err != nil {
+		return err
+	}
+	if len(msg) == 4 {
+		return controllerError(msg[1])
+	}
+	// MULCMD SRP success, as answered by a Corrigo and checked by stampzilla's
+	// SRP client: SOA, 0x01, 0x00, checksum 0x01, EOM.
+	// The bare EXOline ACK is SOA, checksum 0x00, EOM.
+	if bytes.Equal(msg, []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}) || bytes.Equal(msg, []byte{0x3d, 0x00, 0x3e}) {
+		return nil
+	}
+	return fmt.Errorf("unexpected write response, got %d bytes", len(msg))
+}
+
+func (c *Client) exchange(ctx context.Context, msg []byte) ([]byte, error) {
+	if c.Conn == nil || c.Reader == nil {
+		return nil, errors.New("not connected")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := c.setDeadline(ctx); err != nil {
+		return nil, err
+	}
+	if err := c.send(msg); err != nil {
+		return nil, err
+	}
+	return c.read()
 }
 
 func (c *Client) setDeadline(ctx context.Context) error {
@@ -214,6 +269,7 @@ func (c *Client) read() ([]byte, error) {
 func controllerError(code byte) error {
 	reasons := map[byte]string{
 		0x15: "variable not found or access denied",
+		0x19: "illegal parameter value",
 		0x40: "framing error",
 		0x41: "checksum mismatch",
 		0x42: "empty response",
