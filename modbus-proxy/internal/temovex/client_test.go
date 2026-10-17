@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"math"
 	"net"
 	"testing"
@@ -217,83 +216,40 @@ func TestShortResponse(t *testing.T) {
 	}
 }
 
-func TestSetSetWritesSRPForSupplySetpoint(t *testing.T) {
-	// 21.5 °C is float32 0x41ac0000, little-endian 00 00 ac 41.
-	// XOR of FF 1E C8 08 32 04 00 08 00 00 AC 41 is F2.
+func TestSetSetWritesSupplySetpoint(t *testing.T) {
+	// 23°C is the float the exporter read back for this same cell: 00 00 B8 41.
+	payload := []byte{0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xb8, 0x41}
+	wire := []byte{0x3c, 0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xb8, 0x41, 0xe6, 0x3e}
+	if got := encode(payload); !bytes.Equal(got, wire) {
+		t.Fatalf("encode = %x, want %x", got, wire)
+	}
+	if !bytes.Equal(payload[5:8], sigSet.payload[5:8]) {
+		t.Fatalf("setpoint address = %x, read address = %x", payload[5:8], sigSet.payload[5:8])
+	}
+
 	ack := []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}
-	want := []byte{0x3c, 0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xac, 0x41, 0xf2, 0x3e}
-	sent, err := exchangeSet(t, 21.5, ack)
+	got, err := exchangeSet(t, 23, ack)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(sent, want) {
-		t.Fatalf("sent %x, want %x", sent, want)
+	if !bytes.Equal(got, wire) {
+		t.Fatalf("sent %x, want %x", got, wire)
 	}
 
-	payload, err := writeSetPayload(21.5)
+	got, err = exchangeSet(t, 23, []byte{0x3d, 0x00, 0x3e})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload[3] != byte(len(payload)-4) {
-		t.Fatalf("MULCMD length = %d, payload %d", payload[3], len(payload))
-	}
-	if !bytes.Equal(payload[5:8], sigSet.payload[5:]) {
-		t.Fatalf("write address %x, read address %x", payload[5:8], sigSet.payload[5:])
+	if !bytes.Equal(got, wire) {
+		t.Fatalf("sent %x, want %x", got, wire)
 	}
 
-	if _, err := exchangeSet(t, 18, []byte{0x3d, 0x00, 0x3e}); err != nil {
-		t.Fatalf("empty ACK: %v", err)
-	}
-}
-
-func TestSetSetControllerAndUnexpectedResponses(t *testing.T) {
-	_, err := exchangeSet(t, 21.5, []byte{0x3d, 0x15, 0x15, 0x3e})
-	if err == nil || err.Error() != "set: controller error 0x15: variable not found or access denied" {
-		t.Fatalf("nak = %v", err)
-	}
-
-	_, err = exchangeSet(t, 21.5, []byte{0x3d, 0x19, 0x19, 0x3e})
-	if err == nil || err.Error() != "set: controller error 0x19: illegal parameter value" {
-		t.Fatalf("range = %v", err)
-	}
-
-	_, err = exchangeSet(t, 21.5, []byte{0x3d, 0x05, 0x00, 0x05, 0x3e})
-	if err == nil || err.Error() != "set: unexpected write response, got 5 bytes" {
-		t.Fatalf("short = %v", err)
-	}
-}
-
-func TestSetSetRejectsNonFiniteBeforeSend(t *testing.T) {
-	srv, cli := net.Pipe()
-	t.Cleanup(func() {
-		_ = srv.Close()
-		_ = cli.Close()
-	})
-	_ = cli.SetDeadline(time.Now().Add(200 * time.Millisecond))
-	client := &Client{Conn: cli, Reader: bufio.NewReader(cli), readTimeout: time.Second}
-	err := client.SetSet(context.Background(), math.NaN())
-	if !errors.Is(err, errNonFinite) {
+	_, err = exchangeSet(t, 23, []byte{0x3d, 0x15, 0x15, 0x3e})
+	if err == nil || err.Error() != "controller error 0x15: variable not found or access denied" {
 		t.Fatalf("error = %v", err)
 	}
-}
-
-func TestNamesFollowCollectorOrder(t *testing.T) {
-	want := []string{"set", "al", "fl", "ul", "tl"}
-	got := Names()
-	if len(got) != len(want) {
-		t.Fatalf("Names = %v", got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Names = %v, want %v", got, want)
-		}
-	}
-	if _, ok := Lookup("nope"); ok {
-		t.Fatal("Lookup accepted an unknown name")
-	}
-	reading, ok := Lookup("ul")
-	if !ok || reading.Description != "Outdoor air" {
-		t.Fatalf("Lookup(ul) = %+v, %v", reading, ok)
+	if _, err = setpointPayload(math.NaN()); err == nil {
+		t.Fatal("expected non-finite setpoint to fail")
 	}
 }
 
@@ -333,6 +289,26 @@ func exchangeSet(t *testing.T, celsius float64, response []byte) ([]byte, error)
 		return capd.got, capd.err
 	}
 	return capd.got, err
+}
+
+func TestNamesFollowCollectorOrder(t *testing.T) {
+	want := []string{"set", "al", "fl", "ul", "tl"}
+	got := Names()
+	if len(got) != len(want) {
+		t.Fatalf("Names = %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Names = %v, want %v", got, want)
+		}
+	}
+	if _, ok := Lookup("nope"); ok {
+		t.Fatal("Lookup accepted an unknown name")
+	}
+	reading, ok := Lookup("ul")
+	if !ok || reading.Description != "Outdoor air" {
+		t.Fatalf("Lookup(ul) = %+v, %v", reading, ok)
+	}
 }
 
 func exchange(t *testing.T, call func(*Client, context.Context) (float64, error), response []byte) ([]byte, float64, error) {

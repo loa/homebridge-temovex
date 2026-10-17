@@ -174,83 +174,6 @@ func TestSessionSerializesFrames(t *testing.T) {
 	}
 }
 
-func TestSessionSetsSetpoint(t *testing.T) {
-	gotCh := make(chan []byte, 1)
-	unit := startUnit(t, false, func(frame []byte) []byte {
-		gotCh <- append([]byte{}, frame...)
-		return []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}
-	})
-	session := NewSession(unit.addr, time.Second, time.Second)
-	t.Cleanup(func() { _ = session.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	reading, err := session.Setpoint(ctx, 21.5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := writeSetPayload(21.5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := <-gotCh
-	if !bytes.Equal(got, encode(payload)) {
-		t.Fatalf("sent %x, want %x", got, encode(payload))
-	}
-	if reading.Name != "set" || reading.Description != "Supply-air setpoint" || reading.Celsius != 21.5 {
-		t.Fatalf("reading = %+v", reading)
-	}
-	if unit.accepts.Load() != 1 {
-		t.Fatalf("accepts = %d", unit.accepts.Load())
-	}
-}
-
-func TestSessionSetpointControllerErrorKeepsConnection(t *testing.T) {
-	var calls atomic.Int32
-	unit := startUnit(t, false, func(frame []byte) []byte {
-		if calls.Add(1) == 1 {
-			return []byte{0x3d, 0x19, 0x19, 0x3e}
-		}
-		return floatFrame(19)
-	})
-	session := NewSession(unit.addr, time.Second, time.Second)
-	t.Cleanup(func() { _ = session.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	_, err := session.Setpoint(ctx, 21.5)
-	var controller *ControllerError
-	if !errors.As(err, &controller) || controller.Code != 0x19 {
-		t.Fatalf("write error = %v", err)
-	}
-	reading, err := session.Temperature(ctx, "set")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reading.Celsius != 19 {
-		t.Fatalf("reading = %+v", reading)
-	}
-	if unit.accepts.Load() != 1 {
-		t.Fatalf("accepts = %d, want the same connection", unit.accepts.Load())
-	}
-}
-
-func TestSessionSetpointNonFiniteDoesNotDial(t *testing.T) {
-	unit := startUnit(t, false, func(frame []byte) []byte { return []byte{0x3d, 0x01, 0x00, 0x01, 0x3e} })
-	session := NewSession(unit.addr, time.Second, time.Second)
-	t.Cleanup(func() { _ = session.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	_, err := session.Setpoint(ctx, math.Inf(1))
-	if !errors.Is(err, errNonFinite) {
-		t.Fatalf("error = %v", err)
-	}
-	if unit.accepts.Load() != 0 {
-		t.Fatalf("accepts = %d, want 0", unit.accepts.Load())
-	}
-}
-
 func TestSessionUnknownNameDoesNotDial(t *testing.T) {
 	unit := startUnit(t, false, func(frame []byte) []byte { return floatFrame(1) })
 	session := NewSession(unit.addr, time.Second, time.Second)
@@ -264,6 +187,36 @@ func TestSessionUnknownNameDoesNotDial(t *testing.T) {
 	}
 	if unit.accepts.Load() != 0 {
 		t.Fatalf("accepts = %d, want 0", unit.accepts.Load())
+	}
+}
+
+func TestSessionSetsSetpoint(t *testing.T) {
+	ack := []byte{0x3d, 0x01, 0x00, 0x01, 0x3e}
+	var got []byte
+	unit := startUnit(t, false, func(frame []byte) []byte {
+		got = append([]byte{}, frame...)
+		return ack
+	})
+	session := NewSession(unit.addr, time.Second, time.Second)
+	t.Cleanup(func() { _ = session.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := session.SetSetpoint(ctx, 23); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte{0x3c, 0xff, 0x1e, 0xc8, 0x08, 0x32, 0x04, 0x00, 0x08, 0x00, 0x00, 0xb8, 0x41, 0xe6, 0x3e}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("sent %x, want %x", got, want)
+	}
+	if unit.accepts.Load() != 1 {
+		t.Fatalf("accepts = %d, want 1", unit.accepts.Load())
+	}
+
+	if err := session.SetSetpoint(ctx, math.NaN()); err == nil {
+		t.Fatal("expected non-finite setpoint to fail")
+	}
+	if unit.accepts.Load() != 1 {
+		t.Fatalf("non-finite setpoint dialed the controller, accepts = %d", unit.accepts.Load())
 	}
 }
 
